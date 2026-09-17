@@ -35,6 +35,18 @@ def get_product(asin_or_url: str, zip_code: str = Query("10001", description="US
         return data
     except HTTPException:
         raise
+@app.get("/api/search")
+def search_products(
+    query: str = Query(..., description="Amazon search query keyword, e.g. 'wireless earbuds' or 'phone'"),
+    page: int = Query(1, ge=1, description="Results page number")
+):
+    try:
+        data = engine.search_products(query=query, page=page)
+        if not data.get("success"):
+            raise HTTPException(status_code=400, detail=data.get("error", "Failed to perform Amazon search"))
+        return data
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 

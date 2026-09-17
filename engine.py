@@ -221,3 +221,105 @@ class AmazonStealthEngine:
             "zip_code": self.zip_code,
             "timestamp": int(time.time())
         }
+
+    def search_products(self, query: str, page: int = 1) -> dict:
+        """Searches Amazon for products matching the query and returns structured results."""
+        clean_query = query.strip()
+        url = f"https://www.amazon.com/s?k={clean_query.replace(' ', '+')}&page={page}"
+        
+        response = self.session.get(url, headers=self.headers, timeout=15)
+        if not self._zip_initialized:
+            self._initialize_zip(response.text)
+            response = self.session.get(url, headers=self.headers, timeout=15)
+
+        if response.status_code != 200:
+            return {
+                "success": False,
+                "error": f"Amazon status code {response.status_code}",
+                "query": clean_query,
+                "page": page,
+                "total_results": 0,
+                "results": []
+            }
+
+        soup = BeautifulSoup(response.text, "html.parser")
+        items = soup.select('div[data-component-type="s-search-result"]')
+        results = []
+
+        for item in items:
+            asin = item.get("data-asin")
+            if not asin:
+                continue
+
+            title_el = item.select_one("h2 span")
+            title = title_el.get_text(strip=True) if title_el else None
+
+            # Price
+            price = None
+            p_match = re.search(r'\$([0-9,]+\.[0-9]{2})', item.get_text())
+            if p_match:
+                try:
+                    price = float(p_match.group(1).replace(",", ""))
+                except ValueError:
+                    pass
+
+            # Rating
+            rating = None
+            rating_el = item.select_one(".a-icon-alt")
+            if rating_el:
+                r_match = re.search(r'([0-9.]+)\s+out', rating_el.get_text(strip=True))
+                if r_match:
+                    try:
+                        rating = float(r_match.group(1))
+                    except ValueError:
+                        pass
+
+            # Reviews count
+            reviews_count = None
+            reviews_el = item.select_one("span.a-size-base.s-underline-text")
+            if reviews_el:
+                c_match = re.search(r'([0-9,]+)', reviews_el.get_text(strip=True))
+                if c_match:
+                    try:
+                        reviews_count = int(c_match.group(1).replace(",", ""))
+                    except ValueError:
+                        pass
+
+            # Primary image
+            img_el = item.select_one("img.s-image")
+            image_url = img_el.get("src") if img_el else None
+
+            # Badges
+            is_prime = bool(item.select_one(".a-icon-prime"))
+            is_sponsored = bool(item.select_one(".puis-sponsored-label-text, .s-sponsored-label-info-icon"))
+            is_best_seller = bool(item.select_one(".a-badge-label"))
+
+            # Social proof / Sales volume
+            sales_volume = None
+            bought_el = item.select_one(".a-row.a-size-base .a-size-base")
+            if bought_el and "bought in past month" in bought_el.get_text():
+                sales_volume = bought_el.get_text(strip=True)
+
+            results.append({
+                "asin": asin,
+                "title": title,
+                "price": price,
+                "currency": "USD",
+                "rating": rating,
+                "reviews_count": reviews_count,
+                "sales_volume": sales_volume,
+                "image_url": image_url,
+                "is_prime": is_prime,
+                "is_sponsored": is_sponsored,
+                "is_best_seller": is_best_seller,
+                "product_url": f"https://www.amazon.com/dp/{asin}"
+            })
+
+        return {
+            "success": True,
+            "query": clean_query,
+            "page": page,
+            "total_results": len(results),
+            "results": results
+        }
+
