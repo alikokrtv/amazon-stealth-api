@@ -79,13 +79,14 @@ class AmazonStealthEngine:
                 "asin": asin
             }
 
-        soup = BeautifulSoup(response.text, "html.parser")
+        html = response.text
+        soup = BeautifulSoup(html, "html.parser")
 
         # 1. Title
         title_elem = soup.find("span", {"id": "productTitle"})
         title = title_elem.get_text(strip=True) if title_elem else None
 
-        # 2. Price extraction
+        # 2. Price extraction (Current price)
         price = None
         price_whole = soup.find("span", class_="a-price-whole")
         price_fraction = soup.find("span", class_="a-price-fraction")
@@ -94,14 +95,23 @@ class AmazonStealthEngine:
             frac = price_fraction.get_text(strip=True) if price_fraction else "00"
             price = float(f"{whole}.{frac}")
         else:
-            # Fallback to offscreen price
             offscreen = soup.find("span", class_="a-offscreen")
             if offscreen:
                 price_match = re.search(r'[\$]?([0-9,]+\.[0-9]{2})', offscreen.get_text(strip=True))
                 if price_match:
                     price = float(price_match.group(1).replace(",", ""))
 
-        # 3. Availability
+        # 3. Original / List Price & Discount
+        original_price = None
+        list_price_elem = soup.find("span", class_="basisPrice") or soup.find("span", class_="a-price a-text-price")
+        if list_price_elem:
+            off_span = list_price_elem.find("span", class_="a-offscreen")
+            if off_span:
+                lp_match = re.search(r'[\$]?([0-9,]+\.[0-9]{2})', off_span.get_text(strip=True))
+                if lp_match:
+                    original_price = float(lp_match.group(1).replace(",", ""))
+
+        # 4. Availability
         avail_elem = soup.find("div", {"id": "availability"})
         availability = "In Stock"
         if avail_elem:
@@ -109,10 +119,10 @@ class AmazonStealthEngine:
             if avail_text:
                 availability = avail_text
         
-        if price is None and "See All Buying Options" in response.text:
+        if price is None and "See All Buying Options" in html:
             availability = "Available from other sellers"
 
-        # 4. Rating & Reviews
+        # 5. Rating & Reviews Count
         rating = None
         rating_elem = soup.find("span", {"id": "acrPopover"})
         if rating_elem:
@@ -127,25 +137,86 @@ class AmazonStealthEngine:
             if c_match:
                 reviews_count = int(c_match.group(1).replace(",", ""))
 
-        # 5. Image URL
+        # 6. Sales Volume (e.g. "1K+ bought in past month")
+        sales_volume = None
+        bought_match = re.search(r'([0-9Kk\+]+ bought in past month)', html)
+        if bought_match:
+            sales_volume = bought_match.group(1)
+
+        # 7. Brand
+        brand_elem = soup.find("a", {"id": "bylineInfo"})
+        brand = brand_elem.get_text(strip=True).replace("Brand: ", "").replace("Visit the ", "") if brand_elem else None
+
+        # 8. Primary Image & Full Photo Gallery
         img_elem = soup.find("img", {"id": "landingImage"})
         image_url = img_elem.get("src") if img_elem else None
 
-        # 6. Brand
-        brand_elem = soup.find("a", {"id": "bylineInfo"})
-        brand = brand_elem.get_text(strip=True).replace("Brand: ", "").replace("Visit the ", "") if brand_elem else None
+        # Extract all high-res photos from scripts and attributes
+        hires_matches = re.findall(r'"hiRes":"(https://m\.media-amazon\.com/images/I/[^"]+)"', html)
+        large_matches = re.findall(r'"large":"(https://m\.media-amazon\.com/images/I/[^"]+)"', html)
+        photos_found = hires_matches if hires_matches else large_matches
+        product_photos = list(dict.fromkeys(photos_found)) if photos_found else ([image_url] if image_url else [])
+
+        # 9. Bullet Points (About Product)
+        about_product = [
+            li.get_text(strip=True)
+            for li in soup.select("#feature-bullets ul li span.a-list-item")
+            if li.get_text(strip=True) and not li.get_text(strip=True).startswith("Make sure this fits")
+        ]
+
+        # 10. Product Description
+        desc_elem = soup.find("div", {"id": "productDescription"})
+        product_description = desc_elem.get_text(strip=True) if desc_elem else None
+
+        # 11. Specifications & Technical Details
+        product_information = {}
+        for tr in soup.select("#productDetails_techSpec_section_1 tr, #prodDetails tr"):
+            th = tr.find("th")
+            td = tr.find("td")
+            if th and td:
+                k = th.get_text(strip=True).replace("\n", "").replace("\u200e", "").strip()
+                v = td.get_text(strip=True).replace("\n", "").replace("\u200e", "").strip()
+                if k and v:
+                    product_information[k] = v
+
+        for li in soup.select("#detailBullets_feature_div ul li"):
+            text = li.get_text(strip=True).replace("\u200e", "")
+            if ":" in text:
+                parts = text.split(":", 1)
+                k = parts[0].strip()
+                v = parts[1].strip()
+                if k and v:
+                    product_information[k] = v
+
+        # 12. Best Sellers Rank (BSR)
+        best_sellers_rank = product_information.get("Best Sellers Rank")
+
+        # 13. Badges
+        is_best_seller = bool(soup.find(class_=re.compile(r'badge-wrapper|best-seller')) or "Best Seller" in html[:15000])
+        is_amazon_choice = bool(soup.find(class_=re.compile(r'amazons-choice|ac-badge-wrapper')) or "Amazon's Choice" in html[:15000])
+        is_prime = bool(soup.find("i", class_=re.compile(r'a-icon-prime')) or "a-icon-prime" in html)
 
         return {
             "success": True,
             "asin": asin,
             "title": title,
             "price": price,
+            "original_price": original_price,
             "currency": "USD",
             "availability": availability,
             "rating": rating,
             "reviews_count": reviews_count,
+            "sales_volume": sales_volume,
             "brand": brand,
             "image_url": image_url,
+            "product_photos": product_photos,
+            "about_product": about_product,
+            "product_description": product_description,
+            "product_information": product_information,
+            "best_sellers_rank": best_sellers_rank,
+            "is_prime": is_prime,
+            "is_best_seller": is_best_seller,
+            "is_amazon_choice": is_amazon_choice,
             "product_url": url,
             "zip_code": self.zip_code,
             "timestamp": int(time.time())
